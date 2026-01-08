@@ -1,0 +1,46 @@
+{
+  "categories": [
+    {
+      "name": "Phone",
+      "packages": [
+        "com.google.android.apps.messaging",
+        "com.google.android.dialer",
+        "com.google.android.contacts",
+        "com.android.settings"
+      ]
+    },
+    {
+      "name": "Productivity",
+      "packages": [
+        "com.google.android.gm",
+        "org.mozilla.focus"
+      ]
+    },
+    {
+      "name": "Camera",
+      "packages": [
+        "com.motorola.camera3",
+        "com.google.android.apps.photos"
+      ]
+    },
+    {
+      "name": "Utilities",
+      "packages": [
+        "com.google.android.apps.maps",
+        "com.google.android.calendar",
+        "com.google.android.calculator",
+        "com.google.android.deskclock"
+      ]
+    },
+    {
+      "name": "Everything else",
+      "packages": [
+        "com.chase.sig.android",
+        "org.boringreport.app",
+        "com.lastpass.lpandroid",
+        "com.google.android.apps.googleassistant",
+        "com.google.android.apps.nbu.files"
+      ]
+    }
+  ]
+}
