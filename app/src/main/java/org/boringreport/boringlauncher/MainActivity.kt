@@ -5,10 +5,14 @@ import org.boringreport.boringlauncher.R
 import android.app.ActivityOptions
 import android.content.Context
 import android.content.Intent
+import android.content.pm.LauncherActivityInfo
+import android.content.pm.LauncherApps
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.graphics.drawable.Drawable
 import android.os.Bundle
+import android.os.UserHandle
+import android.os.UserManager
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -42,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat.getSystemService
 import com.google.gson.Gson
 import kotlinx.coroutines.delay
 import org.boringreport.boringlauncher.ui.theme.BoringLauncherTheme
@@ -117,8 +122,8 @@ class MainActivity : ComponentActivity() {
 
     }
 }
-data class App(val name: String? = null, val icon: Drawable? = null, val packageName: String? = null)
-data class AppCategory(val name: String, val apps: List<App>)
+//data class App(val name: String? = null, val packageName: String? = null)
+data class AppCategory(val name: String, val apps: List<LauncherActivityInfo>)
 
 data class CategoryJson(val name: String, val packages: List<String>)
 data class CategoriesWrapper(val categories: List<CategoryJson>)
@@ -126,25 +131,69 @@ data class CategoriesWrapper(val categories: List<CategoryJson>)
 @Composable
 fun AppList(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+
+    val launcherApps =
+        context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
+//    val userManager = context.getSystemService(Context.USER_SERVICE) as UserManager
+
+    val profiles: List<UserHandle> = launcherApps.profiles
+
+    val appList: MutableList<LauncherActivityInfo> = mutableListOf()
+
+    for (profile in profiles) {
+        val apps = launcherApps.getActivityList(null, profile)
+        appList.addAll(apps)
+        Log.d("VK", profile.toString())
+    }
+
+
     val packageManager = context.packageManager
-    val appList:List<ResolveInfo> = packageManager
-        .queryIntentActivities(Intent(Intent.ACTION_MAIN,null)
-            .addCategory(Intent.CATEGORY_LAUNCHER),0)
+//    val appList:List<ResolveInfo> = packageManager
+//        .queryIntentActivities(Intent(Intent.ACTION_MAIN,null)
+//            .addCategory(Intent.CATEGORY_LAUNCHER),0)
 
     var showEverythingElse by remember {mutableStateOf(false)}
 
-    val apps = ArrayList<App>()
+    val apps = ArrayList<LauncherActivityInfo>()
 
-    val whitelist = arrayOf("com.android.settings", "com.google.android.apps.maps", "com.google.android.apps.messaging", "com.google.android.apps.photos", "com.google.android.calculator", "com.google.android.calendar", "com.google.android.contacts", "com.google.android.deskclock", "com.google.android.dialer", "com.google.android.gm", "com.motorola.camera3", "com.google.android.apps.googleassistant", "com.google.android.apps.nbu.files", "com.chase.sig.android", "com.lastpass.lpandroid", "org.boringreport.app", "org.mozilla.focus")
+    val whitelist = arrayOf(
+        "com.android.settings",
+        "com.google.android.apps.maps",
+        "com.google.android.apps.messaging",
+        "com.google.android.apps.photos",
+        "com.google.android.calculator",
+        "com.google.android.calendar",
+        "com.google.android.contacts",
+        "com.google.android.deskclock",
+        "com.google.android.dialer",
+        "com.google.android.gm",
+        "com.motorola.camera3",
+        "com.google.android.apps.googleassistant",
+        "com.google.android.apps.nbu.files",
+        "com.chase.sig.android",
+        "com.lastpass.lpandroid",
+        "org.boringreport.app",
+        "org.mozilla.focus",
+        "com.facebook.orca",
+        "je.fit",
+        "com.microsoft.office.outlook",
+        "com.whatsapp",
+        "com.microsoft.teams",
+
+        "com.lifetimefitness.interests.fitness",
+        "com.rsa.securidapp",
+        "com.google.android.keep",
+        "com.google.android.GoogleCamera"
+    )
 
     for (app in appList) {
+        Log.d("VK-packages", app.activityInfo.packageName)
         if(app.activityInfo.packageName != context.packageName && whitelist.contains(app.activityInfo.packageName)) {
-            Log.d("VK", app.activityInfo.packageName)
-            apps.add(App(
-                app.loadLabel(packageManager).toString(),
-                app.loadIcon(packageManager),
-                app.activityInfo.packageName,
-            ))
+            apps.add(app)
+//            apps.add(App(
+//                app.label.toString(),
+//                app.activityInfo.packageName,
+//            ))
         }
     }
 
@@ -153,7 +202,7 @@ fun AppList(modifier: Modifier = Modifier) {
     val gson = Gson()
     val categoriesWrapper = gson.fromJson(jsonString, CategoriesWrapper::class.java)
 
-    val appsByPackage = apps.associateBy { it.packageName }
+    val appsByPackage = apps.associateBy { it.activityInfo.packageName }
 
     val categorizedApps = categoriesWrapper.categories.map { category ->
         val matchingApps = category.packages.mapNotNull { packageName ->
@@ -294,8 +343,8 @@ fun getFormattedDate(): String {
 }
 
 @Composable
-fun AppItem(app: App) {
-    val rowHeight = 38
+fun AppItem(app: LauncherActivityInfo) {
+    val rowHeight = 36
     val context = LocalContext.current
     val view = LocalView.current
 
@@ -303,29 +352,36 @@ fun AppItem(app: App) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = app.name?.lowercase() ?: "",
+            text = app.label.toString().lowercase() ?: "",
             fontSize = rowHeight.sp,
             fontFamily = FontManager.fontFamily,
             fontWeight = FontWeight.Bold,
             color = Color.White,
             modifier = Modifier.clickable {
-                val pm: PackageManager = context.packageManager
-
-                val intent = pm.getLaunchIntentForPackage(app.packageName ?: "")
-
-                if (intent != null) {
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-
-                    val options = ActivityOptions.makeScaleUpAnimation(
-                        view,
-                        view.width / 3,
-                        view.height / 3,
-                        view.width,
-                        view.height
-                    )
-
-                    context.startActivity(intent, options.toBundle())
-                }
+                val launcherApps = context.getSystemService(LauncherApps::class.java)
+                launcherApps.startMainActivity(
+                    app.componentName,
+                    app.user,
+                     null,
+                    Bundle()
+                )
+//                val pm: PackageManager = context.packageManager
+//
+//                val intent = pm.getLaunchIntentForPackage(app.activityInfo.packageName ?: "")
+//
+//                if (intent != null) {
+//                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+//
+//                    val options = ActivityOptions.makeScaleUpAnimation(
+//                        view,
+//                        view.width / 3,
+//                        view.height / 3,
+//                        view.width,
+//                        view.height
+//                    )
+//
+//                    context.startActivity(intent, options.toBundle())
+//                }
             }
         )
     }
