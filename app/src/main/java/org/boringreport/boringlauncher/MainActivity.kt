@@ -1,19 +1,11 @@
 package org.boringreport.boringlauncher
 
-//import android.R
-import org.boringreport.boringlauncher.R
-import android.app.ActivityOptions
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.pm.LauncherActivityInfo
 import android.content.pm.LauncherApps
-import android.content.pm.PackageManager
-import android.content.pm.ResolveInfo
-import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.os.UserHandle
-import android.os.UserManager
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,7 +15,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -32,8 +23,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,12 +34,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat.getSystemService
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.google.gson.Gson
 import kotlinx.coroutines.delay
 import org.boringreport.boringlauncher.ui.theme.BoringLauncherTheme
@@ -55,38 +48,9 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
-
-/**
- * Loads a JSON file from assets and returns it as a Map<String, Any>
- */
-fun loadJSONString(context: Context, fileName: String): String? {
-    var jsonString: String? = null
-    try {
-        // Open the JSON file from the assets folder
-        val inputStream = context.assets.open(fileName)
-
-        // Get the size of the file
-        val size = inputStream.available()
-
-        // Create a buffer with the size
-        val buffer = ByteArray(size)
-
-        // Read data into the buffer
-        inputStream.read(buffer)
-
-        // Close the input stream
-        inputStream.close()
-
-        // Convert buffer to string
-        jsonString = String(buffer, Charsets.UTF_8)
-
-        return jsonString
-
-    } catch (e: IOException) {
-        e.printStackTrace()
-        return null
-    }
-}
+private const val CATEGORIES_ASSET = "whitelist.json"
+private const val EVERYTHING_ELSE = "everything else"
+private val APP_SPACING = 4.dp
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,115 +68,84 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-
-    }
-
+    // Deprecated APIs, kept because they still drive the launcher's behaviour.
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         overridePendingTransition(R.anim.exit_to_right, R.anim.enter_from_bottom)
     }
 
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-    }
-
-    override fun onBackPressed() {
-
-    }
+    /** The launcher is the home screen, so back is a no-op. */
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() = Unit
 }
-//data class App(val name: String? = null, val packageName: String? = null)
-data class AppCategory(val name: String, val apps: List<LauncherActivityInfo>)
+
+/** One launchable app, with its display name already resolved. */
+data class LauncherApp(
+    val label: String,
+    val componentName: ComponentName,
+    val user: UserHandle
+)
+
+data class AppCategory(val name: String, val apps: List<LauncherApp>)
 
 data class CategoryJson(val name: String, val packages: List<String>)
 data class CategoriesWrapper(val categories: List<CategoryJson>)
+
+/** Reads a file from assets, or returns null if it cannot be read. */
+private fun loadJSONString(context: Context, fileName: String): String? = try {
+    context.assets.open(fileName).bufferedReader().use { it.readText() }
+} catch (e: IOException) {
+    e.printStackTrace()
+    null
+}
+
+/** All launcher-visible apps across every user profile, keyed by package name. */
+private fun loadAppsByPackage(context: Context): Map<String, LauncherApp> {
+    val launcherApps = context.getSystemService(LauncherApps::class.java)
+    val labels = AppLabelResolver(context)
+
+    return launcherApps.profiles
+        .flatMap { profile -> launcherApps.getActivityList(null, profile) }
+        .filter { it.activityInfo.packageName != context.packageName }
+        .associate { info ->
+            info.activityInfo.packageName to LauncherApp(
+                label = labels.resolve(info),
+                componentName = info.componentName,
+                user = info.user
+            )
+        }
+}
+
+/** Categories from the assets file, each holding only the apps installed on this device. */
+private fun loadCategorizedApps(context: Context): List<AppCategory> {
+    val jsonString = loadJSONString(context, CATEGORIES_ASSET) ?: return emptyList()
+    val wrapper = Gson().fromJson(jsonString, CategoriesWrapper::class.java)
+    val appsByPackage = loadAppsByPackage(context)
+
+    return wrapper.categories.map { category ->
+        AppCategory(
+            name = category.name,
+            apps = category.packages.mapNotNull { appsByPackage[it] }
+        )
+    }
+}
 
 @Composable
 fun AppList(modifier: Modifier = Modifier) {
     val context = LocalContext.current
 
-    val launcherApps =
-        context.getSystemService(Context.LAUNCHER_APPS_SERVICE) as LauncherApps
-//    val userManager = context.getSystemService(Context.USER_SERVICE) as UserManager
+    // App labels can fail to load transiently (see AppLabelResolver), so the list is rebuilt
+    // whenever the system reports a package change and whenever the launcher comes back to
+    // the foreground. Without this a name that resolved badly once would stay wrong for the
+    // lifetime of the process.
+    var refreshKey by remember { mutableIntStateOf(0) }
+    val categorizedApps = remember(refreshKey) { loadCategorizedApps(context) }
 
-    val profiles: List<UserHandle> = launcherApps.profiles
+    RefreshOnPackageChanges { refreshKey++ }
+    RefreshOnResume { refreshKey++ }
 
-    val appList: MutableList<LauncherActivityInfo> = mutableListOf()
-
-    for (profile in profiles) {
-        val apps = launcherApps.getActivityList(null, profile)
-        appList.addAll(apps)
-        Log.d("VK", profile.toString())
-    }
-
-
-    val packageManager = context.packageManager
-//    val appList:List<ResolveInfo> = packageManager
-//        .queryIntentActivities(Intent(Intent.ACTION_MAIN,null)
-//            .addCategory(Intent.CATEGORY_LAUNCHER),0)
-
-    var showEverythingElse by remember {mutableStateOf(false)}
-
-    val apps = ArrayList<LauncherActivityInfo>()
-
-    val whitelist = arrayOf(
-        "com.android.settings",
-        "com.google.android.apps.maps",
-        "com.google.android.apps.messaging",
-        "com.google.android.apps.photos",
-        "com.google.android.calculator",
-        "com.google.android.calendar",
-        "com.google.android.contacts",
-        "com.google.android.deskclock",
-        "com.google.android.dialer",
-        "com.google.android.gm",
-        "com.motorola.camera3",
-        "com.google.android.apps.googleassistant",
-        "com.google.android.apps.nbu.files",
-        "com.chase.sig.android",
-        "com.lastpass.lpandroid",
-        "org.boringreport.app",
-        "org.mozilla.focus",
-        "com.facebook.orca",
-        "je.fit",
-        "com.microsoft.office.outlook",
-        "com.whatsapp",
-        "com.microsoft.teams",
-
-        "com.lifetimefitness.interests.fitness",
-        "com.rsa.securidapp",
-        "com.google.android.keep",
-        "com.google.android.GoogleCamera"
-    )
-
-    for (app in appList) {
-        Log.d("VK-packages", app.activityInfo.packageName)
-        if(app.activityInfo.packageName != context.packageName && whitelist.contains(app.activityInfo.packageName)) {
-            apps.add(app)
-//            apps.add(App(
-//                app.label.toString(),
-//                app.activityInfo.packageName,
-//            ))
-        }
-    }
-
-    val jsonString = loadJSONString(context, "whitelist.json")
-
-    val gson = Gson()
-    val categoriesWrapper = gson.fromJson(jsonString, CategoriesWrapper::class.java)
-
-    val appsByPackage = apps.associateBy { it.activityInfo.packageName }
-
-    val categorizedApps = categoriesWrapper.categories.map { category ->
-        val matchingApps = category.packages.mapNotNull { packageName ->
-            appsByPackage[packageName]
-        }
-        AppCategory(
-            name = category.name,
-            apps = matchingApps
-        )
-    }
+    var showEverythingElse by remember { mutableStateOf(false) }
 
     LazyColumn(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -221,66 +154,49 @@ fun AppList(modifier: Modifier = Modifier) {
     ) {
         item {
             Spacer(Modifier.height(50.dp))
-//            Image(
-//                modifier = Modifier
-//                    .size(75.dp)
-//                    .clickable {
-//                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://google.com/search?q=hello"))
-//                        context.startActivity(intent)
-//                    },
-//                painter = painterResource(id = R.drawable.ic_launcher_foreground_transparent),
-//                contentDescription = "",
-//                colorFilter = ColorFilter.tint(Color.White
-//            ))
             DateTimeDisplay()
             Spacer(Modifier.height(100.dp))
         }
 
-        categorizedApps.forEach {category ->
+        categorizedApps.forEach { category ->
             val categoryName = category.name.lowercase()
-            var categoryHeader = category.name.lowercase()
-            val isEverythingElse = categoryName == "everything else"
+            val isEverythingElse = categoryName == EVERYTHING_ELSE
 
-            if (isEverythingElse) {
-                categoryHeader = "${if (showEverythingElse) "▼" else "▶"} $categoryHeader"
-            }
             item {
-                Text(
-                    fontSize = 14.sp,
-                    fontFamily = FontManager.fontFamily,
-                    text = categoryHeader,
-                    color = Color.LightGray,
-                    modifier = Modifier.clickable {
-                        if (isEverythingElse) {
-                            showEverythingElse = !showEverythingElse
-                        }
+                CategoryHeader(
+                    text = if (isEverythingElse) {
+                        "${if (showEverythingElse) "▼" else "▶"} $categoryName"
+                    } else {
+                        categoryName
+                    },
+                    onClick = if (isEverythingElse) {
+                        { showEverythingElse = !showEverythingElse }
+                    } else {
+                        null
                     }
                 )
-                Spacer(Modifier.height(5.dp))
             }
 
-            if (!isEverythingElse) {
-                category.apps.forEach { app ->
-                    item {
-                        AppItem(app)
-                        Spacer(Modifier.height(4.dp)) // Space between apps
-                    }
-                }
-            } else {
+            if (isEverythingElse) {
                 item {
                     AnimatedVisibility(
                         visible = showEverythingElse,
                         enter = expandVertically(),
                         exit = shrinkVertically()
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             category.apps.forEach { app ->
                                 AppItem(app)
-                                Spacer(Modifier.height(4.dp)) // Space between apps
+                                Spacer(Modifier.height(APP_SPACING))
                             }
                         }
+                    }
+                }
+            } else {
+                category.apps.forEach { app ->
+                    item {
+                        AppItem(app)
+                        Spacer(Modifier.height(APP_SPACING))
                     }
                 }
             }
@@ -293,16 +209,27 @@ fun AppList(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun DateTimeDisplay() {
-    val currentTime = remember { mutableStateOf(getFormattedTime()) }
-    val currentDate = remember { mutableStateOf(getFormattedDate()) }
+private fun CategoryHeader(text: String, onClick: (() -> Unit)?) {
+    Text(
+        text = text,
+        fontSize = 14.sp,
+        fontFamily = FontManager.fontFamily,
+        color = Color.LightGray,
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    )
+    Spacer(Modifier.height(5.dp))
+}
 
-    // Update every minute
+@Composable
+fun DateTimeDisplay() {
+    var currentTime by remember { mutableStateOf(getFormattedTime()) }
+    var currentDate by remember { mutableStateOf(getFormattedDate()) }
+
     LaunchedEffect(Unit) {
         while (true) {
-            currentTime.value = getFormattedTime()
-            currentDate.value = getFormattedDate()
-            delay(1_000) // 1 minute
+            currentTime = getFormattedTime()
+            currentDate = getFormattedDate()
+            delay(1_000)
         }
     }
 
@@ -311,88 +238,90 @@ fun DateTimeDisplay() {
         modifier = Modifier.padding(16.dp)
     ) {
         Text(
-            text = currentDate.value,
+            text = currentDate,
             fontSize = 22.sp,
-//            fontWeight = FontWeight.SemiBold,
             fontFamily = FontManager.fontFamily,
             color = Color.LightGray
         )
 
         Text(
-            text = currentTime.value,
+            text = currentTime,
             fontSize = 48.sp,
             fontWeight = FontWeight.ExtraBold,
             fontFamily = FontManager.fontFamily,
             color = Color.White
         )
-
     }
 }
 
-// Helper functions
-fun getFormattedTime(): String {
-    val now = LocalTime.now()
-    val formatter = DateTimeFormatter.ofPattern("h:mm a")
-    return now.format(formatter).replace(" ", "").lowercase()
-}
+private val TIME_FORMATTER = DateTimeFormatter.ofPattern("h:mm a")
+private val DATE_FORMATTER = DateTimeFormatter.ofPattern("EEEE, MMMM d")
 
-fun getFormattedDate(): String {
-    val now = LocalDate.now()
-    val formatter = DateTimeFormatter.ofPattern("EEEE, MMMM d")
-    return now.format(formatter).lowercase()
-}
+fun getFormattedTime(): String =
+    LocalTime.now().format(TIME_FORMATTER).replace(" ", "").lowercase()
+
+fun getFormattedDate(): String =
+    LocalDate.now().format(DATE_FORMATTER).lowercase()
 
 @Composable
-fun AppItem(app: LauncherActivityInfo) {
-    val rowHeight = 36
+fun AppItem(app: LauncherApp) {
     val context = LocalContext.current
-    val view = LocalView.current
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = app.label.toString().lowercase() ?: "",
-            fontSize = rowHeight.sp,
-            fontFamily = FontManager.fontFamily,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
-            modifier = Modifier.clickable {
-                val launcherApps = context.getSystemService(LauncherApps::class.java)
-                launcherApps.startMainActivity(
-                    app.componentName,
-                    app.user,
-                     null,
-                    Bundle()
-                )
-//                val pm: PackageManager = context.packageManager
-//
-//                val intent = pm.getLaunchIntentForPackage(app.activityInfo.packageName ?: "")
-//
-//                if (intent != null) {
-//                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-//
-//                    val options = ActivityOptions.makeScaleUpAnimation(
-//                        view,
-//                        view.width / 3,
-//                        view.height / 3,
-//                        view.width,
-//                        view.height
-//                    )
-//
-//                    context.startActivity(intent, options.toBundle())
-//                }
-            }
-        )
-    }
-
+    Text(
+        text = app.label.lowercase(),
+        fontSize = 36.sp,
+        fontFamily = FontManager.fontFamily,
+        fontWeight = FontWeight.Bold,
+        color = Color.White,
+        modifier = Modifier.clickable {
+            context.getSystemService(LauncherApps::class.java)
+                .startMainActivity(app.componentName, app.user, null, Bundle())
+        }
+    )
 }
 
-
-@Preview(showBackground = true)
+/** Invokes [onChange] when a package is installed, removed, changed, or becomes (un)available. */
 @Composable
-fun GreetingPreview() {
-    BoringLauncherTheme {
-        AppList()
+private fun RefreshOnPackageChanges(onChange: () -> Unit) {
+    val context = LocalContext.current
+
+    DisposableEffect(context) {
+        val launcherApps = context.getSystemService(LauncherApps::class.java)
+        val callback = object : LauncherApps.Callback() {
+            override fun onPackageAdded(packageName: String, user: UserHandle) = onChange()
+            override fun onPackageRemoved(packageName: String, user: UserHandle) = onChange()
+            override fun onPackageChanged(packageName: String, user: UserHandle) = onChange()
+
+            // Fired when a package's storage volume is mounted or unmounted - the case most
+            // likely to have handed us a package name in place of a label.
+            override fun onPackagesAvailable(
+                packageNames: Array<out String>,
+                user: UserHandle,
+                replacing: Boolean
+            ) = onChange()
+
+            override fun onPackagesUnavailable(
+                packageNames: Array<out String>,
+                user: UserHandle,
+                replacing: Boolean
+            ) = onChange()
+        }
+
+        launcherApps.registerCallback(callback)
+        onDispose { launcherApps.unregisterCallback(callback) }
+    }
+}
+
+/** Invokes [onResume] each time the launcher returns to the foreground. */
+@Composable
+private fun RefreshOnResume(onResume: () -> Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) onResume()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 }
