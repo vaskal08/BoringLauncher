@@ -1,24 +1,30 @@
 package org.boringreport.boringlauncher
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.LauncherApps
 import android.os.Bundle
 import android.os.UserHandle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -30,29 +36,44 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.google.gson.Gson
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.boringreport.boringlauncher.ui.theme.BoringLauncherTheme
-import java.io.IOException
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
-private const val CATEGORIES_ASSET = "whitelist.json"
-private const val EVERYTHING_ELSE = "everything else"
 private val APP_SPACING = 4.dp
+private val CLOCK_TO_APPS_SPACING = 200.dp
+private const val HOMECOMING_FROM_SCALE = 0.88f
+private const val HOMECOMING_DURATION_MS = 300
 
 class MainActivity : ComponentActivity() {
+
+    /**
+     * Held by the activity rather than the composition so that onNewIntent can reset it: the
+     * launcher is already running when home is pressed, and that press means "show me home".
+     */
+    private var customizing by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -62,10 +83,29 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     containerColor = Color.Black
                 ) { innerPadding ->
-                    AppList(modifier = Modifier.padding(innerPadding))
+                    val screenModifier = Modifier
+                        .padding(innerPadding)
+                        .homecoming()
+
+                    if (customizing) {
+                        CustomizeScreen(
+                            onDone = { customizing = false },
+                            modifier = screenModifier
+                        )
+                    } else {
+                        AppList(
+                            onCustomize = { customizing = true },
+                            modifier = screenModifier
+                        )
+                    }
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        customizing = false
     }
 
     // Deprecated APIs, kept because they still drive the launcher's behaviour.
@@ -74,138 +114,99 @@ class MainActivity : ComponentActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         overridePendingTransition(R.anim.exit_to_right, R.anim.enter_from_bottom)
     }
-
-    /** The launcher is the home screen, so back is a no-op. */
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onBackPressed() = Unit
 }
 
-/** One launchable app, with its display name already resolved. */
-data class LauncherApp(
-    val label: String,
-    val componentName: ComponentName,
-    val user: UserHandle
-)
-
-data class AppCategory(val name: String, val apps: List<LauncherApp>)
-
-data class CategoryJson(val name: String, val packages: List<String>)
-data class CategoriesWrapper(val categories: List<CategoryJson>)
-
-/** Reads a file from assets, or returns null if it cannot be read. */
-private fun loadJSONString(context: Context, fileName: String): String? = try {
-    context.assets.open(fileName).bufferedReader().use { it.readText() }
-} catch (e: IOException) {
-    e.printStackTrace()
-    null
-}
-
-/** All launcher-visible apps across every user profile, keyed by package name. */
-private fun loadAppsByPackage(context: Context): Map<String, LauncherApp> {
-    val launcherApps = context.getSystemService(LauncherApps::class.java)
-    val labels = AppLabelResolver(context)
-
-    return launcherApps.profiles
-        .flatMap { profile -> launcherApps.getActivityList(null, profile) }
-        .filter { it.activityInfo.packageName != context.packageName }
-        .associate { info ->
-            info.activityInfo.packageName to LauncherApp(
-                label = labels.resolve(info),
-                componentName = info.componentName,
-                user = info.user
-            )
-        }
-}
-
-/** Categories from the assets file, each holding only the apps installed on this device. */
-private fun loadCategorizedApps(context: Context): List<AppCategory> {
-    val jsonString = loadJSONString(context, CATEGORIES_ASSET) ?: return emptyList()
-    val wrapper = Gson().fromJson(jsonString, CategoriesWrapper::class.java)
-    val appsByPackage = loadAppsByPackage(context)
-
-    return wrapper.categories.map { category ->
-        AppCategory(
-            name = category.name,
-            apps = category.packages.mapNotNull { appsByPackage[it] }
-        )
-    }
-}
-
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun AppList(modifier: Modifier = Modifier) {
+fun AppList(onCustomize: () -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
+
+    // The launcher is the home screen, so back has nowhere to go.
+    BackHandler {}
 
     // App labels can fail to load transiently (see AppLabelResolver), so the list is rebuilt
     // whenever the system reports a package change and whenever the launcher comes back to
     // the foreground. Without this a name that resolved badly once would stay wrong for the
     // lifetime of the process.
     var refreshKey by remember { mutableIntStateOf(0) }
-    val categorizedApps = remember(refreshKey) { loadCategorizedApps(context) }
+    // Re-reading on every entry also picks up folder edits on the way back from
+    // CustomizeScreen, which removes this composable from the composition.
+    val folders = remember(refreshKey) { loadFolderedApps(context) }
 
     RefreshOnPackageChanges { refreshKey++ }
     RefreshOnResume { refreshKey++ }
 
     var showEverythingElse by remember { mutableStateOf(false) }
 
-    LazyColumn(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(0.dp),
-        modifier = modifier.fillMaxSize()
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            // Long-pressing the empty space around the list opens customization. Rows handle
+            // their own long press, since a tap there is claimed by the app launch.
+            .pointerInput(Unit) {
+                detectTapGestures(onLongPress = { onCustomize() })
+            }
     ) {
-        item {
-            Spacer(Modifier.height(50.dp))
-            DateTimeDisplay()
-            Spacer(Modifier.height(100.dp))
-        }
-
-        categorizedApps.forEach { category ->
-            val categoryName = category.name.lowercase()
-            val isEverythingElse = categoryName == EVERYTHING_ELSE
-
+        LazyColumn(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+            modifier = Modifier.fillMaxSize()
+        ) {
             item {
-                CategoryHeader(
-                    text = if (isEverythingElse) {
-                        "${if (showEverythingElse) "▼" else "▶"} $categoryName"
-                    } else {
-                        categoryName
-                    },
-                    onClick = if (isEverythingElse) {
-                        { showEverythingElse = !showEverythingElse }
-                    } else {
-                        null
-                    }
-                )
+                Spacer(Modifier.height(50.dp))
+                DateTimeDisplay()
+                Spacer(Modifier.height(CLOCK_TO_APPS_SPACING))
             }
 
-            if (isEverythingElse) {
+            folders.forEach { category ->
+                val categoryName = category.name.lowercase()
+                val isEverythingElse = category.isEverythingElse
+
                 item {
-                    AnimatedVisibility(
-                        visible = showEverythingElse,
-                        enter = expandVertically(),
-                        exit = shrinkVertically()
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            category.apps.forEach { app ->
-                                AppItem(app)
-                                Spacer(Modifier.height(APP_SPACING))
+                    CategoryHeader(
+                        text = if (isEverythingElse) {
+                            "${if (showEverythingElse) "▼" else "▶"} $categoryName"
+                        } else {
+                            categoryName
+                        },
+                        onClick = if (isEverythingElse) {
+                            { showEverythingElse = !showEverythingElse }
+                        } else {
+                            null
+                        }
+                    )
+                }
+
+                if (isEverythingElse) {
+                    item {
+                        AnimatedVisibility(
+                            visible = showEverythingElse,
+                            enter = expandVertically(),
+                            exit = shrinkVertically()
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                category.apps.forEach { app ->
+                                    AppItem(app, onLongPress = onCustomize)
+                                    Spacer(Modifier.height(APP_SPACING))
+                                }
                             }
                         }
                     }
-                }
-            } else {
-                category.apps.forEach { app ->
-                    item {
-                        AppItem(app)
-                        Spacer(Modifier.height(APP_SPACING))
+                } else {
+                    category.apps.forEach { app ->
+                        item {
+                            AppItem(app, onLongPress = onCustomize)
+                            Spacer(Modifier.height(APP_SPACING))
+                        }
                     }
                 }
+
+                item { Spacer(Modifier.height(42.dp)) } // Space between categories
             }
 
-            item { Spacer(Modifier.height(42.dp)) } // Space between categories
+            item { Spacer(Modifier.height(75.dp)) }
         }
-
-        item { Spacer(Modifier.height(75.dp)) }
-    }
+        }
 }
 
 @Composable
@@ -263,9 +264,15 @@ fun getFormattedTime(): String =
 fun getFormattedDate(): String =
     LocalDate.now().format(DATE_FORMATTER).lowercase()
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun AppItem(app: LauncherApp) {
+fun AppItem(app: LauncherApp, onLongPress: () -> Unit) {
     val context = LocalContext.current
+    val rootView = LocalView.current
+
+    // Where this row sits on screen, so the app can be launched as though it were unfolding
+    // from it. See launchApp.
+    var bounds by remember { mutableStateOf<Rect?>(null) }
 
     Text(
         text = app.label.lowercase(),
@@ -273,10 +280,12 @@ fun AppItem(app: LauncherApp) {
         fontFamily = FontManager.fontFamily,
         fontWeight = FontWeight.Bold,
         color = Color.White,
-        modifier = Modifier.clickable {
-            context.getSystemService(LauncherApps::class.java)
-                .startMainActivity(app.componentName, app.user, null, Bundle())
-        }
+        modifier = Modifier
+            .onGloballyPositioned { bounds = it.boundsInRoot() }
+            .combinedClickable(
+                onClick = { launchApp(context, rootView, app, bounds) },
+                onLongClick = onLongPress
+            )
     )
 }
 
@@ -309,6 +318,46 @@ private fun RefreshOnPackageChanges(onChange: () -> Unit) {
 
         launcherApps.registerCallback(callback)
         onDispose { launcherApps.unregisterCallback(callback) }
+    }
+}
+
+/**
+ * Settles the launcher's contents up into place whenever it returns to the foreground, so
+ * coming home reads as the launcher arriving rather than a screen sliding in beside the app.
+ *
+ * This only animates what is inside our own window. The app -> home transition itself belongs
+ * to the system: the outgoing app's animation is not ours to set, and making it shrink into
+ * the launcher needs remote animations, which are gated behind a signature-level permission
+ * that only the system launcher holds.
+ */
+@Composable
+private fun Modifier.homecoming(): Modifier {
+    val scale = remember { Animatable(1f) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch {
+                    scale.snapTo(HOMECOMING_FROM_SCALE)
+                    scale.animateTo(
+                        targetValue = 1f,
+                        animationSpec = tween(
+                            durationMillis = HOMECOMING_DURATION_MS,
+                            easing = FastOutSlowInEasing
+                        )
+                    )
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    return graphicsLayer {
+        scaleX = scale.value
+        scaleY = scale.value
     }
 }
 

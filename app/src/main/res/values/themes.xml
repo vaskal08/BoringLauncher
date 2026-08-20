@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.BoringLauncher" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.BoringLauncher" parent="android:Theme.Material.NoActionBar">
+        <!--
+          A launcher is supposed to be the wallpaper's window. Declaring that reclassifies the
+          app -> home transition from a task change, which slides the launcher in from the
+          side, into a wallpaper transition, where the app moves away and the launcher is
+          revealed in place.
+
+          Note that the animation itself is not ours to pick. Custom windowAnimationStyle
+          entries (wallpaperOpenEnterAnimation and friends) are ignored here: since Android 12
+          the app <-> home transition is run by Shell transitions, which use system animations.
+          Verified on API 35 - a deliberately absurd 1500ms enter animation had no effect.
+        -->
+        <item name="android:windowShowWallpaper">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+
 </resources>
