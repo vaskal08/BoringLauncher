@@ -27,6 +27,8 @@ data class Folder(val name: String, val packages: List<String>)
  * [hidden] holds packages the user unchecked inside "everything else". Membership is opt-out
  * rather than opt-in so that a newly installed app shows up on its own; only apps explicitly
  * unchecked stay out of the drawer.
+ *
+ * An app belongs to at most one folder. Anything in none of them falls to "everything else".
  */
 data class LauncherConfig(
     val folders: List<Folder> = emptyList(),
@@ -62,12 +64,14 @@ class LauncherConfigStore(private val context: Context) {
         return try {
             val parsed = Gson().fromJson(json, ConfigFile::class.java)
 
+            val folders = parsed?.categories.orEmpty().mapNotNull { entry ->
+                val name = entry?.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (name.equals(EVERYTHING_ELSE, ignoreCase = true)) return@mapNotNull null
+                Folder(name = name, packages = entry.packages?.filterNotNull().orEmpty())
+            }
+
             LauncherConfig(
-                folders = parsed?.categories.orEmpty().mapNotNull { entry ->
-                    val name = entry?.name?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    if (name.equals(EVERYTHING_ELSE, ignoreCase = true)) return@mapNotNull null
-                    Folder(name = name, packages = entry.packages?.filterNotNull().orEmpty())
-                },
+                folders = withExclusiveMembership(folders),
                 hidden = parsed?.hidden?.filterNotNull()?.toSet().orEmpty()
             )
         } catch (e: JsonSyntaxException) {
@@ -85,6 +89,20 @@ class LauncherConfigStore(private val context: Context) {
             file.writeText(Gson().toJson(contents))
         } catch (e: IOException) {
             Log.w(TAG, "Could not save config", e)
+        }
+    }
+
+    /**
+     * Enforces one folder per app, first folder wins. The customization screen maintains this
+     * as edits happen, but a config written before the rule existed - or edited by hand - can
+     * still list the same package twice, which would otherwise show it twice on the home
+     * screen.
+     */
+    private fun withExclusiveMembership(folders: List<Folder>): List<Folder> {
+        val claimed = mutableSetOf<String>()
+
+        return folders.map { folder ->
+            folder.copy(packages = folder.packages.filter { claimed.add(it) })
         }
     }
 

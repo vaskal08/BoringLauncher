@@ -22,10 +22,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -45,6 +48,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalView
@@ -63,6 +67,8 @@ import java.time.format.DateTimeFormatter
 
 private val APP_SPACING = 4.dp
 private val CLOCK_TO_APPS_SPACING = 200.dp
+private val DRAWER_TOP_PADDING = 24.dp
+private const val DRAWER_EXPAND_MS = 200
 private const val HOMECOMING_FROM_SCALE = 0.88f
 private const val HOMECOMING_DURATION_MS = 300
 
@@ -138,6 +144,26 @@ fun AppList(onCustomize: () -> Unit, modifier: Modifier = Modifier) {
 
     var showEverythingElse by remember { mutableStateOf(false) }
 
+    val listState = rememberLazyListState()
+    val everythingElseIndex = folders.indexOfFirst { it.isEverythingElse }
+    val drawerTopPadding = with(LocalDensity.current) { DRAWER_TOP_PADDING.roundToPx() }
+
+    // Opening the drawer at the bottom of the screen otherwise leaves its heading where it
+    // was, forcing a second scroll to read what just appeared. Bring it up to the top edge
+    // instead; animateScrollToItem stops at the end of the list on its own when the content
+    // is too short to get all the way there.
+    LaunchedEffect(showEverythingElse) {
+        if (!showEverythingElse || everythingElseIndex < 0) return@LaunchedEffect
+
+        // The expansion has to finish adding its height first, or the scroll runs out of
+        // list and stops short of the heading.
+        delay(DRAWER_EXPAND_MS.toLong())
+        listState.animateScrollToItem(
+            index = everythingElseIndex + 1, // + 1 for the clock, which is item 0
+            scrollOffset = -drawerTopPadding
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -148,6 +174,7 @@ fun AppList(onCustomize: () -> Unit, modifier: Modifier = Modifier) {
             }
     ) {
         LazyColumn(
+            state = listState,
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(0.dp),
             modifier = Modifier.fillMaxSize()
@@ -158,55 +185,65 @@ fun AppList(onCustomize: () -> Unit, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(CLOCK_TO_APPS_SPACING))
             }
 
-            folders.forEach { category ->
-                val categoryName = category.name.lowercase()
-                val isEverythingElse = category.isEverythingElse
-
-                item {
-                    CategoryHeader(
-                        text = if (isEverythingElse) {
-                            "${if (showEverythingElse) "▼" else "▶"} $categoryName"
-                        } else {
-                            categoryName
-                        },
-                        onClick = if (isEverythingElse) {
-                            { showEverythingElse = !showEverythingElse }
-                        } else {
-                            null
-                        }
-                    )
-                }
-
-                if (isEverythingElse) {
-                    item {
-                        AnimatedVisibility(
-                            visible = showEverythingElse,
-                            enter = expandVertically(),
-                            exit = shrinkVertically()
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                category.apps.forEach { app ->
-                                    AppItem(app, onLongPress = onCustomize)
-                                    Spacer(Modifier.height(APP_SPACING))
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    category.apps.forEach { app ->
-                        item {
-                            AppItem(app, onLongPress = onCustomize)
-                            Spacer(Modifier.height(APP_SPACING))
-                        }
-                    }
-                }
-
-                item { Spacer(Modifier.height(42.dp)) } // Space between categories
+            // One item per folder, so that scrolling to a folder is scrolling to an index.
+            items(folders) { folder ->
+                FolderSection(
+                    folder = folder,
+                    expanded = showEverythingElse,
+                    onToggle = { showEverythingElse = !showEverythingElse },
+                    onLongPress = onCustomize
+                )
             }
 
             item { Spacer(Modifier.height(75.dp)) }
         }
+    }
+}
+
+@Composable
+private fun FolderSection(
+    folder: AppFolder,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        val name = folder.name.lowercase()
+
+        CategoryHeader(
+            text = if (folder.isEverythingElse) {
+                "${if (expanded) "▼" else "▶"} $name"
+            } else {
+                name
+            },
+            onClick = if (folder.isEverythingElse) onToggle else null
+        )
+
+        if (folder.isEverythingElse) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(tween(DRAWER_EXPAND_MS)),
+                exit = shrinkVertically(tween(DRAWER_EXPAND_MS))
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    folder.apps.forEach { app ->
+                        AppItem(app, onLongPress = onLongPress)
+                        Spacer(Modifier.height(APP_SPACING))
+                    }
+                }
+            }
+        } else {
+            folder.apps.forEach { app ->
+                AppItem(app, onLongPress = onLongPress)
+                Spacer(Modifier.height(APP_SPACING))
+            }
         }
+
+        Spacer(Modifier.height(42.dp)) // Space between folders
+    }
 }
 
 @Composable
