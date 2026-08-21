@@ -71,9 +71,33 @@ fun CustomizeScreen(onDone: () -> Unit, modifier: Modifier = Modifier) {
             FolderEditor(
                 folder = folder,
                 allApps = allApps,
-                onChange = { updated ->
+                otherFolders = config.folders
+                    .filterIndexed { index, _ -> index != target.index }
+                    .flatMap { other -> other.packages.map { it to other.name } }
+                    .toMap(),
+                onRename = { name ->
                     val folders = config.folders.toMutableList()
-                    folders[target.index] = updated
+                    folders[target.index] = folder.copy(name = name)
+                    update(config.copy(folders = folders))
+                },
+                onToggleApp = { packageName ->
+                    val wasChecked = packageName in folder.packages
+
+                    val folders = config.folders.mapIndexed { index, candidate ->
+                        when {
+                            index == target.index && wasChecked ->
+                                candidate.copy(packages = candidate.packages - packageName)
+
+                            index == target.index ->
+                                candidate.copy(packages = candidate.packages + packageName)
+
+                            // Checking an app here takes it out of whichever folder held it,
+                            // so it never appears on the home screen twice.
+                            wasChecked -> candidate
+
+                            else -> candidate.copy(packages = candidate.packages - packageName)
+                        }
+                    }
                     update(config.copy(folders = folders))
                 },
                 onBack = { editing = null },
@@ -214,7 +238,9 @@ private fun FolderList(
 private fun FolderEditor(
     folder: Folder,
     allApps: List<LauncherApp>,
-    onChange: (Folder) -> Unit,
+    otherFolders: Map<String, String>,
+    onRename: (String) -> Unit,
+    onToggleApp: (String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -234,7 +260,7 @@ private fun FolderEditor(
             // The folder name doubles as the heading the home screen shows for this group.
             BasicTextField(
                 value = folder.name,
-                onValueChange = { onChange(folder.copy(name = it)) },
+                onValueChange = onRename,
                 singleLine = true,
                 textStyle = TextStyle(
                     color = Color.White,
@@ -257,14 +283,10 @@ private fun FolderEditor(
             AppCheckRow(
                 label = app.label,
                 checked = app.packageName in checked,
-                onClick = {
-                    val packages = if (app.packageName in checked) {
-                        folder.packages - app.packageName
-                    } else {
-                        folder.packages + app.packageName
-                    }
-                    onChange(folder.copy(packages = packages))
-                }
+                // An app lives in one folder at a time, so say where it is now rather than
+                // silently moving it out from under another folder.
+                note = otherFolders[app.packageName]?.lowercase()?.let { "in $it" },
+                onClick = { onToggleApp(app.packageName) }
             )
         }
 
@@ -323,7 +345,12 @@ private fun EverythingElseEditor(
 }
 
 @Composable
-private fun AppCheckRow(label: String, checked: Boolean, onClick: () -> Unit) {
+private fun AppCheckRow(
+    label: String,
+    checked: Boolean,
+    onClick: () -> Unit,
+    note: String? = null
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -343,6 +370,15 @@ private fun AppCheckRow(label: String, checked: Boolean, onClick: () -> Unit) {
             fontFamily = FontManager.fontFamily,
             color = if (checked) Color.White else Color.Gray
         )
+        if (note != null) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = note,
+                fontSize = 13.sp,
+                fontFamily = FontManager.fontFamily,
+                color = Color.DarkGray
+            )
+        }
     }
 }
 
